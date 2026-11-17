@@ -180,13 +180,28 @@ def _(mo):
 
 
 @app.cell
-def _(RATINGS_CSV, footprint_mib, fraction, measure, pd):
+def _(RATINGS_CSV, footprint_mib, fraction, measure, mo, pd):
     ratings_naive, load_naive = measure("read_csv, default dtypes", pd.read_csv, RATINGS_CSV)
     ratings_naive = ratings_naive.sample(frac=fraction.value, random_state=0) if fraction.value < 1 else ratings_naive
     load_naive["footprint_MiB"] = footprint_mib(ratings_naive)
     load_naive["rows"] = len(ratings_naive)
-    ratings_naive.dtypes.to_frame("dtype").assign(
-        min=ratings_naive.min(), max=ratings_naive.max()
+    _int_ranges = mo.md(r"""
+    | Type | Bytes | Range |
+    |---|---|---|
+    | `int8` / `uint8` | 1 | −128..127 / 0..255 |
+    | `int16` / `uint16` | 2 | −32,768..32,767 / 0..65,535 |
+    | `int32` / `uint32` | 4 | about ±2.1 billion / 0..4.3 billion |
+    | `int64` | 8 | about ±9.2 × 10¹⁸ |
+    """)
+    mo.hstack(
+        [
+            ratings_naive.dtypes.to_frame("dtype").assign(
+                min=ratings_naive.min(), max=ratings_naive.max()
+            ),
+            _int_ranges,
+        ],
+        justify="start",
+        gap=2,
     )
     return load_naive, ratings_naive
 
@@ -194,16 +209,9 @@ def _(RATINGS_CSV, footprint_mib, fraction, measure, pd):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    Look at the `min` and `max` columns. A rating is between 1 and 5, and there
-    are only 10,000 books, yet every value occupies eight bytes. The table below
-    lists the smallest type that holds each column's range.
-
-    | Type | Bytes | Range |
-    |---|---|---|
-    | `int8` / `uint8` | 1 | −128..127 / 0..255 |
-    | `int16` / `uint16` | 2 | −32,768..32,767 / 0..65,535 |
-    | `int32` / `uint32` | 4 | about ±2.1 billion / 0..4.3 billion |
-    | `int64` | 8 | about ±9.2 × 10¹⁸ |
+    Compare the `min` and `max` columns on the left with the ranges of the
+    integer types on the right. A rating is between 1 and 5, and there are only
+    10,000 books, yet every value occupies eight bytes.
 
     Edit `TIGHT_DTYPES` below, choosing the smallest type that fits
     each column. If you choose one that is too small, pandas raises an error
