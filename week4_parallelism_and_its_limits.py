@@ -80,14 +80,18 @@ def _(mo):
     host. The operating system can restrict a process to some of them (the
     *affinity*), and a container can be given a CPU quota (in the *cgroup*
     file `cpu.max`), which limits how much CPU time it may use however many
-    CPUs it can see. The number that matters for parallel work is the
-    smallest of these.
+    CPUs it can see. Some sandboxes, including molab's, report none of these
+    limits, so we also measure: we start `k` copies of the same busy loop at
+    once and compare the time with that of one copy. If `k` copies take as long
+    as one, `k` of them ran in parallel.
     """)
     return
 
 
 @app.cell
-def _(os, pd, psutil):
+def _(mo, os, pd, psutil, subprocess, sys):
+    import time
+
     def _read(path):
         try:
             with open(path) as f:
@@ -105,18 +109,41 @@ def _(os, pd, psutil):
     except AttributeError:  # macOS has no affinity call
         _affinity = None
     _mem = _read("/sys/fs/cgroup/memory.max")
+    _reported = int(min(c for c in [os.cpu_count(), _affinity, _cgroup_cpus] if c))
 
-    USABLE_CPUS = max(1, int(min(c for c in [os.cpu_count(), _affinity, _cgroup_cpus] if c)))
+    def _busy(k):
+        """Seconds for k copies of the same busy loop, started at the same time."""
+        _code = "s = 0\nfor i in range(15_000_000): s += i * i"
+        _t0 = time.perf_counter()
+        _procs = [subprocess.Popen([sys.executable, "-c", _code]) for _ in range(k)]
+        for _p in _procs:
+            _p.wait()
+        return time.perf_counter() - _t0
+
+    _one = _busy(1)
+    _probe = [{"copies at once": 1, "seconds": round(_one, 2), "running in parallel": 1.0}]
+    _k = 2
+    while _k <= 2 * _reported:
+        _t = _busy(_k)
+        _probe.append({"copies at once": _k, "seconds": round(_t, 2), "running in parallel": round(_k * _one / _t, 1)})
+        if _probe[-1]["running in parallel"] < 1.2 * _probe[-2]["running in parallel"]:
+            break
+        _k *= 2
+    _measured = max(r["running in parallel"] for r in _probe)
+
+    USABLE_CPUS = max(1, min(_reported, round(_measured)))
     WORKERS = sorted({k for k in [1, 2, 4, 8, 16, USABLE_CPUS, 2 * USABLE_CPUS] if k <= min(2 * USABLE_CPUS, 16)})
-    pd.DataFrame([
+    _reports = pd.DataFrame([
         {"source": "os.cpu_count()", "value": os.cpu_count()},
         {"source": "psutil.virtual_memory().total (GiB)", "value": round(psutil.virtual_memory().total / 2**30, 1)},
         {"source": "os.sched_getaffinity(0)", "value": _affinity},
         {"source": "cgroup cpu.max (CPUs)", "value": _cgroup_cpus},
         {"source": "cgroup memory.max (GiB)", "value": round(int(_mem) / 2**30, 1) if _mem and _mem.isdigit() else _mem},
-        {"source": "usable CPUs (smallest of the above)", "value": USABLE_CPUS},
+        {"source": "measured: most copies running in parallel", "value": _measured},
+        {"source": "usable CPUs (we use this)", "value": USABLE_CPUS},
         {"source": "worker counts we will try", "value": str(WORKERS)},
     ])
+    mo.hstack([_reports, pd.DataFrame(_probe).set_index("copies at once")], justify="start", gap=2)
     return USABLE_CPUS, WORKERS
 
 
@@ -365,9 +392,11 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    The run with one worker is slower than the plain loop, because the worker
-    is a new Python process that has to start and import its libraries before
-    it does any useful work.
+    If the run with one worker is slower than the plain loop, the difference is
+    the cost of starting a worker process. On macOS each worker is a new Python
+    interpreter that has to import its libraries before it does any useful
+    work, while on Linux (before Python 3.14) a worker is a copy of the main
+    process and starts much faster.
 
     ## 5. Word count as MapReduce on one machine
 
